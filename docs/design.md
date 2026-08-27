@@ -1,465 +1,116 @@
-# Jackal–Laptop ROS 2 Network Bringup Design
+# 분산 Jackal 구조와 이전 계획
 
-## 1. Goal
+## 불변 조건
 
-Connect the Clearpath Jackal control PC and a laptop directly over Ethernet and use ROS 2 DDS discovery so that both machines can share ROS 2 topics, services, actions, and TF data.
+- ROS 2 Humble, domain 1, `rmw_fastrtps_cpp`를 모든 장비에서 동일하게 쓴다.
+- 센서 토픽(`/camera`, `/livox`, `/scan`)은 전역 이름을 유지한다.
+- Clearpath와 Nav2는 `/j100_0519` namespace를 사용한다.
+- Fast DDS의 네트워크 UDP는 `192.168.50.0/24` 전용 LAN에만 bind한다.
+- 실제 플랫폼 속도 입력은 monitor-only 검증과 분리하며, commissioning 전에는
+  forwarding하지 않는다.
 
-The intended final workflow is:
-
-```bash
-# Jackal control PC
-source ~/jackal_ws/install/setup.bash
-ros2 launch jackal_network_bringup robot.launch.py
-
-# Laptop
-source ~/jackal_ws/install/setup.bash
-ros2 launch jackal_network_bringup laptop.launch.py
-```
-
-The package should make the ROS-side network configuration reproducible and should eventually allow Nav2 on the Jackal to be monitored and commanded from the laptop.
-
----
-
-## 2. System Architecture
+## Phase A: D455-only
 
 ```text
-                    Ethernet LAN
-                 192.168.50.0/24
-
-       Laptop                           Jackal PC
-   192.168.50.1                      192.168.50.2
-        │                                  │
-        └──────────── ROS 2 DDS ───────────┘
-
-   RViz2 / CLI                       Jackal drivers
-   Monitoring                         Sensors
-   Goal commands                      TF / odometry
-   Research nodes                     Localization
-                                      Nav2
-                                      Controller
+Laptop 192.168.50.1                 NUC 192.168.50.2
+-------------------                 ----------------
+RViz / CLI                          D455 driver
+laptop heartbeat   <--- Fast DDS --> nuc heartbeat
+fixed zero command ----------------> CLI subscriber
+                                      platform OFF
 ```
 
-Recommended responsibility split:
+NUC의 기존 `192.168.131.1/24`, 기관망 DHCP `10.10.22.98/22`, default route는
+보존한다. DDS XML의 로컬 interface allowlist 때문에 기관망 쪽으로 discovery와 user
+data가 나가지 않아야 한다. 이 마지막 문장은 설정 의도이며 packet capture로 확인해야
+확정할 수 있다.
 
-### Jackal PC
-
-- Jackal hardware bringup
-- Sensor drivers
-- TF publishers
-- Odometry
-- Localization
-- Nav2
-- Local controller
-- `/cmd_vel` generation
-
-### Laptop
-
-- RViz2
-- ROS 2 CLI
-- Nav2 goal commands
-- Topic monitoring
-- Data logging
-- Experimental / research nodes
-
-The local navigation controller should remain on the Jackal PC so that temporary Ethernet interruptions do not immediately remove the robot's local control capability.
-
----
-
-## 3. Network Layer
-
-Use a dedicated static-IP Ethernet subnet.
-
-Recommended addresses:
+## Phase B: MID360과 Laptop Nav2
 
 ```text
-Laptop:    192.168.50.1/24
-Jackal PC: 192.168.50.2/24
+MID360 192.168.1.130
+          |
+          | sensor UDP (not DDS)
+          v
+NUC br0 192.168.1.5 + 192.168.50.2       Laptop 192.168.50.1
+----------------------------------       -------------------
+Livox driver -> /livox/lidar             AMCL + Nav2
+PointCloud -> /scan        ------------> map / scan consumer
+D455                                     Twist -> TwistStamped
+safety bridge (monitor only) <---------- /j100_0519/nav2_cmd_vel
+no /j100_0519/cmd_vel publisher
 ```
 
-No gateway or DNS server is required for a direct Ethernet connection.
+Nav2의 최종 `geometry_msgs/msg/Twist`는
+`/j100_0519/nav2_cmd_vel_unstamped`에 격리한다. stamper가 현재 ROS clock과
+`base_link` frame을 붙여 `geometry_msgs/msg/TwistStamped`인
+`/j100_0519/nav2_cmd_vel`을 만든다. NUC safety bridge는 이 토픽을 관찰하지만
+기본값에서는 output publisher를 만들지 않는다. 별도 commissioning에서 forwarding을
+켤 때에만 header를 제거하고 Clearpath Humble API 타입인 `geometry_msgs/msg/Twist`로
+`/j100_0519/cmd_vel`에 출력한다.
 
-The operating system, not ROS 2, should configure these IP addresses.
+지도와 MID360 extrinsic은 repository에서 임의 생성하지 않는다. 지도 YAML/이미지는
+사용자 보유 파일을 넣는다. MID360 기본 장착값은 기존 사용자 workspace의
+`base_link -> livox_frame` 설정을 가져왔지만 아직 이 package에서 실측하지 않았으므로
+확인 후 static TF 또는 URDF에 반영한다. 현재
+Nav2 odometry 입력 토픽은 `/j100_0519/platform/odom`으로 추론해 두었으며 MCU 연결
+후 실제 Clearpath graph로 검증해야 한다.
 
-Reason:
+## Phase C: Radxa X4 도입
 
 ```text
-NetworkManager / OS
-        ↓
-IP configuration and interface management
+                  dedicated unmanaged LAN hub
+             192.168.50.0/24, no institutional uplink
 
-ROS 2 bringup package
-        ↓
-DDS configuration and ROS nodes
+  Radxa X4 .3             NUC .2                 Laptop .1
+  cpr-j100-0519           jackal-sensors
+  ------------            --------------         -------------
+  MCU serial              D455 / MID360           RViz / CLI
+  Clearpath platform      PointCloud -> scan      goals / rosbag
+  command watchdog        AMCL / Nav2             diagnostics
 ```
 
-Avoid calling `sudo`, `nmcli`, or other privileged network configuration commands from a ROS 2 launch file.
-
----
-
-## 4. ROS 2 DDS Configuration
-
-Initial shared ROS 2 environment:
-
-```bash
-export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-```
-
-Both machines must use compatible values.
-
-### ROS_DOMAIN_ID
-
-Use one fixed domain for the Jackal experimental system:
-
-```text
-ROS_DOMAIN_ID=42
-```
-
-This logically separates this robot system from unrelated ROS 2 nodes on the same network.
-
-### ROS_LOCALHOST_ONLY
-
-```text
-ROS_LOCALHOST_ONLY=0
-```
-
-Remote DDS communication must be enabled.
-
-### RMW implementation
-
-Initial recommendation:
-
-```text
-rmw_cyclonedds_cpp
-```
-
-Cyclone DDS makes it straightforward to explicitly control the network interface later if the Jackal PC or laptop has multiple active interfaces such as Ethernet and Wi-Fi.
-
----
-
-## 5. Why Use an Environment Hook
-
-A launch file can set environment variables for processes that it starts, but it cannot modify the environment of the parent terminal.
-
-For example, setting `ROS_DOMAIN_ID` inside `robot.launch.py` does not automatically affect:
-
-```bash
-ros2 topic list
-```
-
-executed later from another shell.
-
-Therefore, the package should install an `ament` environment hook.
-
-Expected behavior:
-
-```bash
-source ~/jackal_ws/install/setup.bash
-```
-
-automatically configures:
-
-```text
-ROS_DOMAIN_ID=42
-ROS_LOCALHOST_ONLY=0
-RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-```
-
-for that shell.
-
----
-
-## 6. ROS 2 Package
-
-Package name:
-
-```text
-jackal_network_bringup
-```
-
-Build type:
-
-```text
-ament_cmake
-```
-
-Initial directory structure:
-
-```text
-jackal_network_bringup/
-├── CMakeLists.txt
-├── package.xml
-├── config/
-├── env-hooks/
-│   └── ros_network.sh
-├── launch/
-│   ├── robot.launch.py
-│   ├── laptop.launch.py
-│   └── network_test.launch.py
-└── scripts/
-    └── check_network.sh
-```
-
----
-
-## 7. Launch Responsibilities
-
-### `robot.launch.py`
-
-Final target:
-
-```text
-robot.launch.py
-├── Jackal hardware bringup
-├── LiDAR / camera drivers
-├── robot_state_publisher / TF
-├── localization
-└── Nav2
-```
-
-This launch file runs on the Jackal control PC.
-
-### `laptop.launch.py`
-
-Final target:
-
-```text
-laptop.launch.py
-├── RViz2
-└── optional monitoring / research nodes
-```
-
-This launch file runs on the laptop.
-
-Nav2 itself should not normally be launched a second time on the laptop.
-
-### `network_test.launch.py`
-
-Used before integrating Nav2.
-
-Purpose:
-
-- verify DDS discovery
-- verify cross-machine topic communication
-- verify ROS domain configuration
-- verify selected RMW implementation
-
----
-
-## 8. Implementation Stages
-
-### Stage 1 — Create the package
-
-Create the package and base directory structure.
-
-### Stage 2 — Add ROS environment hook
-
-Implement:
-
-```text
-ROS_DOMAIN_ID
-ROS_LOCALHOST_ONLY
-RMW_IMPLEMENTATION
-```
-
-through `env-hooks/ros_network.sh`.
-
-Update `CMakeLists.txt` so the hook is installed by `ament_environment_hooks()`.
-
-### Stage 3 — Verify basic DDS communication
-
-Use simple publisher/subscriber nodes before starting Nav2.
-
-Example:
-
-Jackal:
-
-```bash
-ros2 run demo_nodes_cpp talker
-```
-
-Laptop:
-
-```bash
-ros2 run demo_nodes_py listener
-```
-
-Verify:
-
-```bash
-ros2 node list
-ros2 topic list
-```
-
-### Stage 4 — Integrate Jackal bringup
-
-Include the existing Clearpath / Jackal launch stack inside `robot.launch.py`.
-
-Do not replace the known-working robot bringup unnecessarily.
-
-### Stage 5 — Integrate Nav2
-
-Run localization and Nav2 on the Jackal PC.
-
-Verify from the laptop:
-
-```bash
-ros2 action list
-```
-
-and confirm that Nav2 actions such as:
-
-```text
-/navigate_to_pose
-```
-
-are visible.
-
-### Stage 6 — Add laptop RViz bringup
-
-Create `laptop.launch.py` that loads a project-specific RViz configuration.
-
-The laptop should be able to:
-
-- view `/map`
-- view `/odom`
-- view `/tf`
-- view `/scan` or point-cloud topics
-- inspect plans
-- send Nav2 goals
-
-### Stage 7 — Multi-interface DDS configuration
-
-Only add explicit Cyclone DDS interface selection if necessary.
-
-This becomes relevant when either machine simultaneously uses interfaces such as:
-
-```text
-Ethernet
-Wi-Fi
-sensor-specific Ethernet
-Docker bridge interfaces
-```
-
-Do not hard-code interface names until the actual names are confirmed with:
-
-```bash
-ip -br link
-ip -br addr
-```
-
-### Stage 8 — Clock synchronization
-
-Ensure the Jackal PC and laptop have synchronized clocks.
-
-This is important for:
-
-- TF
-- LiDAR timestamps
-- camera timestamps
-- odometry
-- localization
-- Nav2
-
-If the system must operate without Internet access, configure one machine as a local NTP/chrony server and the other as its client.
-
----
-
-## 9. Initial Package Creation Commands
-
-Assuming the workspace is:
-
-```text
-~/jackal_ws
-```
-
-create the package with:
-
-```bash
-source /opt/ros/humble/setup.bash
-
-mkdir -p ~/jackal_ws/src
-cd ~/jackal_ws/src
-
-ros2 pkg create jackal_network_bringup \
-  --build-type ament_cmake \
-  --license Apache-2.0 \
-  --dependencies launch launch_ros
-```
-
-Create the initial directories and files:
-
-```bash
-cd ~/jackal_ws/src/jackal_network_bringup
-
-mkdir -p launch config env-hooks scripts
-
-touch launch/robot.launch.py
-touch launch/laptop.launch.py
-touch launch/network_test.launch.py
-
-touch env-hooks/ros_network.sh
-touch scripts/check_network.sh
-
-chmod +x scripts/check_network.sh
-```
-
-Verify the structure:
-
-```bash
-tree ~/jackal_ws/src/jackal_network_bringup
-```
-
-Expected result:
-
-```text
-jackal_network_bringup/
-├── CMakeLists.txt
-├── package.xml
-├── config
-├── env-hooks
-│   └── ros_network.sh
-├── launch
-│   ├── laptop.launch.py
-│   ├── network_test.launch.py
-│   └── robot.launch.py
-└── scripts
-    └── check_network.sh
-```
-
-Build the empty package once:
-
-```bash
-cd ~/jackal_ws
-
-colcon build \
-  --symlink-install \
-  --packages-select jackal_network_bringup
-```
-
-Then source the workspace:
-
-```bash
-source ~/jackal_ws/install/setup.bash
-```
-
-Confirm that ROS 2 can find the package:
-
-```bash
-ros2 pkg prefix jackal_network_bringup
-```
-
----
-
-## 10. Immediate Next Implementation
-
-The next concrete implementation step is to create:
-
-```text
-env-hooks/ros_network.sh
-```
-
-containing the shared ROS 2 environment configuration and modify `CMakeLists.txt` to install the environment hook.
-
-After that, basic cross-machine DDS communication should be tested before adding Jackal hardware or Nav2 launch files.
+### 이전 순서
+
+1. Radxa에 Ubuntu 22.04와 ROS 2 Humble을 설치하고 `.50.3` 통신을 검증한다.
+2. NUC hostname을 `jackal-sensors`로 변경한 뒤 재부팅하고 DNS/SSH known-host를
+   갱신한다.
+3. Radxa hostname을 `cpr-j100-0519`로 설정한다. 두 장비가 동시에 같은 hostname을
+   쓰는 구간을 만들지 않는다.
+4. Clearpath Humble stack과 기존 `robot.yaml`을 Radxa로 옮기고 domain 1,
+   namespace `j100_0519`, Fast DDS, 실제 MCU 장치를 반영해 platform 파일을 다시
+   생성한다.
+5. MCU USB/serial을 Radxa로 옮기고 platform만 단독 검증한다. 이때 바퀴를 지면에서
+   분리하거나 제조사 commissioning 절차를 따른다.
+6. NUC에서 D455, MID360, `/scan`, AMCL, Nav2를 순차 활성화한다.
+7. NUC를 chrony server, Radxa와 Laptop을 client로 구성하고 offset을 기록한다.
+8. monitor-only command 도달 시험 후 별도 승인된 commissioning에서만
+   `forward_cmd_vel=true`를 사용한다.
+
+### 데이터 배치
+
+대역폭과 지연을 줄이기 위해 D455 이미지와 MID360 raw PointCloud는 NUC 내부
+처리에 우선 사용한다. Laptop 기본 RViz/기록 profile은 `/scan`, map, odom, TF,
+diagnostics, perception 결과만 구독한다. raw 센서가 필요한 실험에서만 명시적으로
+활성화한다.
+
+### 시간과 command safety
+
+NUC는 센서 timestamp의 기준이 되므로 chrony server 역할을 맡는다. Radxa platform
+watchdog은 마지막 유효 명령이 0.5초 이상 오래되면 0 속도를 계속 출력해야 한다.
+LAN cable 제거, Nav2 process kill, NUC power loss를 각각 시험해 물리 정지가 1초
+이내인지 별도 계측한다. repository bridge의 timer 동작만으로 이 물리 안전 조건이
+입증됐다고 보지 않는다.
+
+## 완료 판정
+
+| 단계 | 판정 기준 |
+|---|---|
+| A | 양방향 heartbeat 10초, D455 12 Hz 이상 30초, 고정 0 명령 수신 |
+| B | `/scan`, `map -> odom -> base_link`, AMCL, Nav2 active, stamped 명령 도달 |
+| B safety | bridge가 `/j100_0519/cmd_vel` publisher가 아니며 platform OFF |
+| C network | 전용 hub에서 세 장비 heartbeat와 chrony offset 정상 |
+| C safety | 0.5초 watchdog 및 링크 단절 1초 이내 물리 정지 시험 통과 |
+
+각 판정은 실행 날짜, package commit, 실제 topic type/frame/rate, packet capture와 함께
+기록해야 한다. 아직 측정하지 않은 항목을 통과로 표기하지 않는다.
