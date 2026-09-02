@@ -8,6 +8,10 @@
 - Fast DDS의 네트워크 UDP는 `192.168.50.0/24` 전용 LAN에만 bind한다.
 - 실제 플랫폼 속도 입력은 monitor-only 검증과 분리하며, commissioning 전에는
   forwarding하지 않는다.
+- Phase A/B의 Laptop과 NUC static peer 목록에서는 아직 존재하지 않는 Radxa
+  `.50.3`을 제외한다. Radxa 프로필은 세 주소를 모두 알고 시작하므로 Phase C에서
+  기존 Laptop/NUC participant를 찾을 수 있다. 세 장비가 설치된 뒤 재부팅 순서와
+  late-join discovery를 다시 측정하고 필요하면 세 프로필을 모두 갱신한다.
 
 ## Phase A: D455-only
 

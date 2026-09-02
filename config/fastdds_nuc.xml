@@ -27,7 +27,6 @@
         <initialPeersList>
           <locator><udpv4><address>192.168.50.1</address></udpv4></locator>
           <locator><udpv4><address>192.168.50.2</address></udpv4></locator>
-          <locator><udpv4><address>192.168.50.3</address></udpv4></locator>
         </initialPeersList>
       </builtin>
       <userTransports>

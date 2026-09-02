@@ -43,7 +43,6 @@ def test_public_launch_files_generate_descriptions():
 
 
 def test_role_profiles_are_unicast_only_and_keep_shm():
-    peer_addresses = set(ROLE_IPS.values())
     for role, role_ip in ROLE_IPS.items():
         root = element_tree.parse(
             CONFIG_DIR / f'fastdds_{role}.xml').getroot()
@@ -68,7 +67,10 @@ def test_role_profiles_are_unicast_only_and_keep_shm():
             './/f:useBuiltinTransports', FAST_DDS_NAMESPACE)
 
         assert allowlist == {role_ip}
-        assert initial_peers == peer_addresses
+        expected_peers = set(ROLE_IPS.values())
+        if role in ('laptop', 'nuc'):
+            expected_peers.remove(ROLE_IPS['radxa'])
+        assert initial_peers == expected_peers
         assert transports == {'UDPv4', 'SHM'}
         assert avoid_multicast.text == 'true'
         assert builtin_transports.text == 'false'
@@ -88,6 +90,8 @@ def test_structured_config_files_parse():
         mid360 = json.load(stream)
     assert mid360['MID360']['host_net_info']['point_data_ip'] == '192.168.1.5'
     assert mid360['lidar_configs'][0]['ip'] == '192.168.1.130'
+    translation = mid360['lidar_configs'][0]['extrinsic_parameter']
+    assert all(isinstance(translation[axis], int) for axis in ('x', 'y', 'z'))
 
     for path in (
             CONFIG_DIR / 'nav2' / 'j100_0519.yaml',
@@ -105,6 +109,15 @@ def test_network_env_refuses_direct_execution():
     )
     assert result.returncode == 2
     assert 'must be sourced' in result.stderr
+
+
+def test_nuc_networkd_dropin_adds_robot_and_sensor_lan_addresses():
+    dropin = CONFIG_DIR / 'systemd' / '50-jackal-lan.conf'
+    assert dropin.read_text(encoding='utf-8').splitlines() == [
+        '[Network]',
+        'Address=192.168.50.2/24',
+        'Address=192.168.1.5/24',
+    ]
 
 
 def test_shell_scripts_have_valid_syntax():
@@ -156,6 +169,13 @@ def test_realsense_launch_uses_current_profile_argument_names():
         encoding='utf-8')
     assert "'rgb_camera.color_profile': '640,480,15'" in launch
     assert "'depth_module.depth_profile': '640,480,15'" in launch
+
+
+def test_mid360_scan_conversion_is_separately_switchable():
+    launch = (PACKAGE_ROOT / 'launch' / 'robot.launch.py').read_text(
+        encoding='utf-8')
+    assert "DeclareLaunchArgument('launch_mid360_scan'" in launch
+    assert "LaunchConfiguration('launch_mid360_scan')" in launch
 
 
 def test_safety_bridge_adapts_to_clearpath_twist_output():

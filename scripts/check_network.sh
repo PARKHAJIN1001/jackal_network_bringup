@@ -11,6 +11,7 @@ Usage:
   check_network.sh preflight <laptop|nuc|radxa>
   check_network.sh verify-peer <laptop|nuc|radxa>
   check_network.sh verify-d455
+  check_network.sh verify-mid360
   check_network.sh wait-zero-cmd
   check_network.sh send-zero-cmd
 
@@ -142,7 +143,7 @@ verify_peer() {
   validate_role "$role" || return $?
 
   printf 'Checking 10 seconds of continuous %s heartbeat ...\n' "$role"
-  if timeout 18s ros2 run "$PACKAGE_NAME" network_verifier.py \
+  if timeout 30s ros2 run "$PACKAGE_NAME" network_verifier.py \
       heartbeat "$role"; then
     pass "received a continuous heartbeat from '$role'"
     return 0
@@ -153,11 +154,21 @@ verify_peer() {
 
 verify_d455() {
   printf 'Checking D455 publishers and 30-second image rates ...\n'
-  if timeout 40s ros2 run "$PACKAGE_NAME" network_verifier.py d455; then
+  if timeout 50s ros2 run "$PACKAGE_NAME" network_verifier.py d455; then
     pass "D455 Color/Depth/CameraInfo verification completed"
     return 0
   fi
   fail "D455 publisher, message, or rate verification failed"
+  return 1
+}
+
+verify_mid360() {
+  printf 'Checking MID360 publishers and 10-second point-cloud rate ...\n'
+  if timeout 25s ros2 run "$PACKAGE_NAME" network_verifier.py mid360; then
+    pass "MID360 PointCloud2/IMU verification completed"
+    return 0
+  fi
+  fail "MID360 publisher, message, or rate verification failed"
   return 1
 }
 
@@ -229,6 +240,10 @@ main() {
     verify-d455)
       (($# == 0)) || { usage; return 2; }
       verify_d455
+      ;;
+    verify-mid360)
+      (($# == 0)) || { usage; return 2; }
+      verify_mid360
       ;;
     wait-zero-cmd)
       (($# == 0)) || { usage; return 2; }

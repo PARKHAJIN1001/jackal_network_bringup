@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 
-"""Time-bounded heartbeat and D455 verification used by the shell CLI."""
+"""Time-bounded network and sensor verification used by the shell CLI."""
 
 import argparse
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo
 from sensor_msgs.msg import Image
+from sensor_msgs.msg import Imu
+from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 
 
@@ -18,6 +21,9 @@ HEARTBEAT_MAX_GAP_SEC = 2.5
 D455_DURATION_SEC = 30.0
 D455_EXPECTED_RATE_HZ = 15.0
 D455_MIN_RATE_HZ = D455_EXPECTED_RATE_HZ * 0.8
+MID360_DURATION_SEC = 10.0
+MID360_EXPECTED_RATE_HZ = 15.0
+MID360_MIN_RATE_HZ = MID360_EXPECTED_RATE_HZ * 0.8
 
 
 class TimedVerifier(Node):
@@ -43,7 +49,10 @@ class TimedVerifier(Node):
 def _spin_until(node, predicate, timeout_sec):
     deadline = time.monotonic() + timeout_sec
     while rclpy.ok() and time.monotonic() < deadline:
-        rclpy.spin_once(node, timeout_sec=0.2)
+        try:
+            rclpy.spin_once(node, timeout_sec=0.2)
+        except ExternalShutdownException:
+            return False
         if predicate():
             return True
     return False
@@ -134,6 +143,45 @@ def verify_d455():
     return window_complete and publishers_ok and messages_ok and rates_ok
 
 
+def verify_mid360():
+    """Check MID360 PointCloud2/IMU delivery and the point-cloud rate."""
+    lidar = '/livox/lidar'
+    imu = '/livox/imu'
+
+    node = TimedVerifier()
+    node.watch(PointCloud2, lidar, qos_profile_sensor_data)
+    node.watch(Imu, imu, qos_profile_sensor_data)
+
+    def sample_window_complete():
+        arrivals = node.arrivals[lidar]
+        return (
+            len(arrivals) >= 2
+            and arrivals[-1] - arrivals[0] >= MID360_DURATION_SEC
+            and bool(node.arrivals[imu])
+        )
+
+    window_complete = _spin_until(node, sample_window_complete, 16.0)
+    publishers_ok = True
+    messages_ok = True
+    for topic in (lidar, imu):
+        publisher_count = len(node.get_publishers_info_by_topic(topic))
+        message_count = len(node.arrivals[topic])
+        print(
+            f'MID360 topic={topic} publishers={publisher_count} '
+            f'messages={message_count}')
+        publishers_ok = publishers_ok and publisher_count > 0
+        messages_ok = messages_ok and message_count > 0
+
+    rate = _message_rate(node.arrivals[lidar])
+    print(
+        f'MID360 topic={lidar} measured_rate={rate:.2f}Hz '
+        f'minimum={MID360_MIN_RATE_HZ:.2f}Hz')
+    rates_ok = rate >= MID360_MIN_RATE_HZ
+
+    node.destroy_node()
+    return window_complete and publishers_ok and messages_ok and rates_ok
+
+
 def main(args=None):
     """Parse the internal verifier command and return a process status."""
     parser = argparse.ArgumentParser()
@@ -141,16 +189,20 @@ def main(args=None):
     heartbeat = subparsers.add_parser('heartbeat')
     heartbeat.add_argument('role', choices=('nuc', 'laptop', 'radxa'))
     subparsers.add_parser('d455')
+    subparsers.add_parser('mid360')
     parsed = parser.parse_args(args)
 
     rclpy.init()
     try:
         if parsed.command == 'heartbeat':
             success = verify_heartbeat(parsed.role)
-        else:
+        elif parsed.command == 'd455':
             success = verify_d455()
+        else:
+            success = verify_mid360()
     finally:
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     raise SystemExit(0 if success else 1)
 
 

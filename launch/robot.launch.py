@@ -77,6 +77,7 @@ def generate_launch_description():
         DeclareLaunchArgument('launch_platform', default_value='false'),
         DeclareLaunchArgument('launch_d455', default_value='true'),
         DeclareLaunchArgument('launch_mid360', default_value='false'),
+        DeclareLaunchArgument('launch_mid360_scan', default_value='false'),
         DeclareLaunchArgument(
             'publish_mid360_static_tf', default_value='true'),
         DeclareLaunchArgument('launch_nav2', default_value='false'),
@@ -115,22 +116,30 @@ def generate_launch_description():
             LaunchConfiguration('platform_launch_file')),
         condition=IfCondition(LaunchConfiguration('launch_platform')),
     )
-    d455 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(PathJoinSubstitution([
-            FindPackageShare('realsense2_camera'), 'launch', 'rs_launch.py',
-        ])),
+    d455 = GroupAction(
         condition=IfCondition(LaunchConfiguration('launch_d455')),
-        launch_arguments={
-            'camera_name': 'camera',
-            'camera_namespace': 'camera',
-            'enable_color': 'true',
-            'enable_depth': 'true',
-            'enable_infra1': 'false',
-            'enable_infra2': 'false',
-            'pointcloud.enable': 'false',
-            'rgb_camera.color_profile': '640,480,15',
-            'depth_module.depth_profile': '640,480,15',
-        }.items(),
+        scoped=True,
+        forwarding=False,
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(PathJoinSubstitution([
+                    FindPackageShare('realsense2_camera'),
+                    'launch',
+                    'rs_launch.py',
+                ])),
+                launch_arguments={
+                    'camera_name': 'camera',
+                    'camera_namespace': 'camera',
+                    'enable_color': 'true',
+                    'enable_depth': 'true',
+                    'enable_infra1': 'false',
+                    'enable_infra2': 'false',
+                    'pointcloud.enable': 'false',
+                    'rgb_camera.color_profile': '640,480,15',
+                    'depth_module.depth_profile': '640,480,15',
+                }.items(),
+            ),
+        ],
     )
     mid360 = Node(
         package='livox_ros_driver2',
@@ -178,7 +187,10 @@ def generate_launch_description():
         executable='pointcloud_to_laserscan_node',
         name='livox_pointcloud_to_laserscan',
         output='screen',
-        condition=IfCondition(LaunchConfiguration('launch_mid360')),
+        condition=IfCondition(AndSubstitution(
+            LaunchConfiguration('launch_mid360'),
+            LaunchConfiguration('launch_mid360_scan'),
+        )),
         remappings=[
             ('cloud_in', '/livox/lidar'),
             ('scan', '/scan'),
