@@ -93,11 +93,9 @@ def test_structured_config_files_parse():
     translation = mid360['lidar_configs'][0]['extrinsic_parameter']
     assert all(isinstance(translation[axis], int) for axis in ('x', 'y', 'z'))
 
-    for path in (
-            CONFIG_DIR / 'nav2' / 'j100_0519.yaml',
-            CONFIG_DIR / 'jackal_network.rviz'):
-        with path.open(encoding='utf-8') as stream:
-            assert isinstance(yaml.safe_load(stream), dict)
+    with (CONFIG_DIR / 'jackal_network.rviz').open(
+            encoding='utf-8') as stream:
+        assert isinstance(yaml.safe_load(stream), dict)
 
 
 def test_network_env_refuses_direct_execution():
@@ -120,10 +118,97 @@ def test_nuc_networkd_dropin_adds_robot_and_sensor_lan_addresses():
     ]
 
 
+def test_clearpath_platform_service_uses_the_nuc_fastdds_profile():
+    dropin = (
+        CONFIG_DIR / 'systemd' / 'clearpath-platform.service.d'
+        / '50-jackal-fastdds.conf'
+    )
+    lines = dropin.read_text(encoding='utf-8').splitlines()
+    profile = (
+        '/home/administrator/moai_navigation_ws/install/'
+        'jackal_network_bringup/share/jackal_network_bringup/'
+        'config/fastdds_nuc.xml'
+    )
+    assert lines == [
+        '[Service]',
+        'Environment="ROS_DOMAIN_ID=1"',
+        'Environment="ROS_LOCALHOST_ONLY=0"',
+        'Environment="RMW_IMPLEMENTATION=rmw_fastrtps_cpp"',
+        f'Environment="FASTRTPS_DEFAULT_PROFILES_FILE={profile}"',
+        f'Environment="FASTDDS_DEFAULT_PROFILES_FILE={profile}"',
+    ]
+
+
+def test_sensor_service_starts_the_safe_nuc_sensor_profile():
+    service = CONFIG_DIR / 'systemd' / 'jackal-sensors.service'
+    text = service.read_text(encoding='utf-8')
+
+    assert 'Wants=network-online.target clearpath-platform.service' in text
+    assert 'After=network-online.target clearpath-platform.service' in text
+    assert 'User=administrator' in text
+    assert 'Restart=on-failure' in text
+    assert 'KillSignal=SIGINT' in text
+    assert 'KillMode=mixed' in text
+    assert (
+        'ExecStart=/home/administrator/moai_navigation_ws/install/'
+        'jackal_network_bringup/lib/jackal_network_bringup/'
+        'start_nuc_sensors.sh'
+    ) in text
+
+    launcher = (PACKAGE_ROOT / 'scripts' / 'start_nuc_sensors.sh').read_text(
+        encoding='utf-8')
+    for argument in (
+            'launch_platform:=false',
+            'launch_d455:=true',
+            'launch_mid360:=true',
+            'launch_network_probe:=true'):
+        assert argument in launcher
+    assert 'source "$NETWORK_ENV_FILE" nuc' in launcher
+    assert 'source "$LIVOX_PACKAGE_SETUP"' in launcher
+    assert 'export COLCON_CURRENT_PREFIX="$LIVOX_PREFIX"' in launcher
+    assert 'liblivox_lidar_sdk_shared.so' in launcher
+    assert 'export LD_LIBRARY_PATH=' in launcher
+    assert 'readonly SENSOR_LAN_IP="192.168.1.5"' in launcher
+    assert 'exec ros2 launch jackal_network_bringup robot.launch.py' in launcher
+    assert launcher.index('set -u') > launcher.index(
+        'source "$NETWORK_ENV_FILE" nuc')
+
+
+def test_mid360_driver_is_respawned_after_an_unexpected_exit():
+    launch_text = (PACKAGE_ROOT / 'launch' / 'robot.launch.py').read_text(
+        encoding='utf-8')
+    mid360_start = launch_text.index('mid360 = Node(')
+    mid360_end = launch_text.index('mid360_static_tf = Node(')
+    mid360_block = launch_text[mid360_start:mid360_end]
+
+    assert 'respawn=True' in mid360_block
+    assert 'respawn_delay=5.0' in mid360_block
+
+
+def test_sensor_launcher_fails_cleanly_when_setup_is_missing(tmp_path):
+    missing = tmp_path / 'missing-setup.bash'
+    environment = os.environ.copy()
+    environment.update({
+        'JACKAL_ROS_SETUP_FILE': str(missing),
+        'JACKAL_WORKSPACE_SETUP_FILE': str(missing),
+        'JACKAL_PACKAGE_SHARE_DIR': str(tmp_path / 'missing-share'),
+    })
+    result = subprocess.run(
+        ['bash', str(PACKAGE_ROOT / 'scripts' / 'start_nuc_sensors.sh')],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode == 1
+    assert f'Required setup file is missing: {missing}' in result.stderr
+
+
 def test_shell_scripts_have_valid_syntax():
     for path in (
             CONFIG_DIR / 'network_env.sh',
-            PACKAGE_ROOT / 'scripts' / 'check_network.sh'):
+            PACKAGE_ROOT / 'scripts' / 'check_network.sh',
+            PACKAGE_ROOT / 'scripts' / 'start_nuc_sensors.sh'):
         result = subprocess.run(
             ['bash', '-n', str(path)],
             check=False,
@@ -131,22 +216,6 @@ def test_shell_scripts_have_valid_syntax():
             text=True,
         )
         assert result.returncode == 0, result.stderr
-
-
-def test_send_zero_command_rejects_values_before_ros_access():
-    result = subprocess.run(
-        [
-            'bash',
-            str(PACKAGE_ROOT / 'scripts' / 'check_network.sh'),
-            'send-zero-cmd',
-            '0.1',
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 2
-    assert 'does not accept velocity arguments' in result.stderr
 
 
 def test_no_automatic_middleware_environment_hook_remains():
@@ -171,15 +240,56 @@ def test_realsense_launch_uses_current_profile_argument_names():
     assert "'depth_module.depth_profile': '640,480,15'" in launch
 
 
-def test_mid360_scan_conversion_is_separately_switchable():
-    launch = (PACKAGE_ROOT / 'launch' / 'robot.launch.py').read_text(
-        encoding='utf-8')
-    assert "DeclareLaunchArgument('launch_mid360_scan'" in launch
-    assert "LaunchConfiguration('launch_mid360_scan')" in launch
+def test_network_package_contains_no_navigation_or_drive_implementation():
+    for path in (
+            CONFIG_DIR / 'nav2',
+            CONFIG_DIR / 'maps',
+            PACKAGE_ROOT / 'launch' / 'nav2_navigation.launch.py',
+            PACKAGE_ROOT / 'scripts' / 'twist_stamper.py',
+            PACKAGE_ROOT / 'scripts' / 'cmd_vel_safety_bridge.py'):
+        assert not path.exists()
+
+    inspected_paths = (
+        PACKAGE_ROOT / 'CMakeLists.txt',
+        PACKAGE_ROOT / 'package.xml',
+        PACKAGE_ROOT / 'launch' / 'robot.launch.py',
+        PACKAGE_ROOT / 'launch' / 'laptop.launch.py',
+        PACKAGE_ROOT / 'scripts' / 'check_network.sh',
+        PACKAGE_ROOT / 'scripts' / 'start_nuc_sensors.sh',
+    )
+    implementation = '\n'.join(
+        path.read_text(encoding='utf-8') for path in inspected_paths)
+    for forbidden in (
+            'nav2_bringup',
+            'pointcloud_to_laserscan',
+            'launch_nav2',
+            'launch_mid360_scan',
+            'cmd_vel',
+            'send-zero-cmd'):
+        assert forbidden not in implementation
 
 
-def test_safety_bridge_adapts_to_clearpath_twist_output():
-    bridge = (PACKAGE_ROOT / 'scripts' / 'cmd_vel_safety_bridge.py').read_text(
-        encoding='utf-8')
-    assert 'create_subscription(\n            TwistStamped' in bridge
-    assert 'create_publisher(\n                Twist' in bridge
+def test_rviz_profile_is_sensor_monitoring_only():
+    with (CONFIG_DIR / 'jackal_network.rviz').open(
+            encoding='utf-8') as stream:
+        config = yaml.safe_load(stream)
+
+    manager = config['Visualization Manager']
+    displays = manager['Displays']
+    display_classes = {display['Class'] for display in displays}
+    display_names = {display['Name'] for display in displays}
+    tool_classes = {tool['Class'] for tool in manager['Tools']}
+
+    assert manager['Global Options']['Fixed Frame'] == 'base_link'
+    assert 'MID360 PointCloud' in display_names
+    assert 'D455 Color' in display_names
+    assert 'rviz_default_plugins/PointCloud2' in display_classes
+    assert {
+        'rviz_default_plugins/Map',
+        'rviz_default_plugins/LaserScan',
+        'rviz_default_plugins/Path',
+    }.isdisjoint(display_classes)
+    assert {
+        'rviz_default_plugins/SetInitialPose',
+        'rviz_default_plugins/SetGoal',
+    }.isdisjoint(tool_classes)

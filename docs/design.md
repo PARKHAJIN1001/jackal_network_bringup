@@ -1,120 +1,85 @@
-# 분산 Jackal 구조와 이전 계획
+# Jackal network and NUC sensor design
 
-## 불변 조건
+## 범위
 
-- ROS 2 Humble, domain 1, `rmw_fastrtps_cpp`를 모든 장비에서 동일하게 쓴다.
-- 센서 토픽(`/camera`, `/livox`, `/scan`)은 전역 이름을 유지한다.
-- Clearpath와 Nav2는 `/j100_0519` namespace를 사용한다.
-- Fast DDS의 네트워크 UDP는 `192.168.50.0/24` 전용 LAN에만 bind한다.
-- 실제 플랫폼 속도 입력은 monitor-only 검증과 분리하며, commissioning 전에는
-  forwarding하지 않는다.
-- Phase A/B의 Laptop과 NUC static peer 목록에서는 아직 존재하지 않는 Radxa
-  `.50.3`을 제외한다. Radxa 프로필은 세 주소를 모두 알고 시작하므로 Phase C에서
-  기존 Laptop/NUC participant를 찾을 수 있다. 세 장비가 설치된 뒤 재부팅 순서와
-  late-join discovery를 다시 측정하고 필요하면 세 프로필을 모두 갱신한다.
+이 패키지는 다음 기능만 소유한다.
 
-## Phase A: D455-only
+- Laptop과 NUC의 전용 유선망 주소 및 Fast DDS profile
+- NUC 부팅 시 D455와 MID360 자동 실행
+- Clearpath platform service에 NUC DDS 환경 적용
+- 장비 간 heartbeat와 센서 토픽 검증
+- Laptop의 센서 확인용 RViz 실행
 
-```text
-Laptop 192.168.50.1                 NUC 192.168.50.2
--------------------                 ----------------
-RViz / CLI                          D455 driver
-laptop heartbeat   <--- Fast DDS --> nuc heartbeat
-fixed zero command ----------------> CLI subscriber
-                                      platform OFF
-```
+지도, localization, 경로 계획, 주행 명령 생성·변환은 이 패키지의 범위가 아니다.
 
-NUC의 기존 `192.168.131.1/24`, 기관망 DHCP `10.10.22.98/22`, default route는
-보존한다. DDS XML의 로컬 interface allowlist 때문에 기관망 쪽으로 discovery와 user
-data가 나가지 않아야 한다. 이 마지막 문장은 설정 의도이며 packet capture로 확인해야
-확정할 수 있다.
+## 고정 구성
 
-## Phase B: MID360과 Laptop Nav2
+| 항목 | 값 |
+|---|---|
+| ROS 2 | Humble |
+| Domain | `1` |
+| RMW | `rmw_fastrtps_cpp` |
+| Laptop | `192.168.50.1/24` |
+| NUC | `192.168.50.2/24` |
+| NUC sensor LAN | `192.168.1.5/24` |
+| MID360 | `192.168.1.130` |
+
+센서 토픽은 전역 이름(`/camera/...`, `/livox/...`)을 유지한다. Clearpath platform
+토픽의 `/j100_0519` namespace는 기존 platform 구성을 그대로 사용한다.
+
+## 실행 구조
 
 ```text
-MID360 192.168.1.130
-          |
-          | sensor UDP (not DDS)
-          v
-NUC br0 192.168.1.5 + 192.168.50.2       Laptop 192.168.50.1
-----------------------------------       -------------------
-Livox driver -> /livox/lidar             AMCL + Nav2
-PointCloud -> /scan        ------------> map / scan consumer
-D455                                     Twist -> TwistStamped
-safety bridge (monitor only) <---------- /j100_0519/nav2_cmd_vel
-no /j100_0519/cmd_vel publisher
+Jackal MCU ──USB── Clearpath platform service ──┐
+                                                │ Fast DDS / domain 1
+D455 ──────────── jackal-sensors.service ───────┼── dedicated LAN ── Laptop
+MID360 ────────── jackal-sensors.service ───────┘                   CLI / RViz
 ```
 
-Nav2의 최종 `geometry_msgs/msg/Twist`는
-`/j100_0519/nav2_cmd_vel_unstamped`에 격리한다. stamper가 현재 ROS clock과
-`base_link` frame을 붙여 `geometry_msgs/msg/TwistStamped`인
-`/j100_0519/nav2_cmd_vel`을 만든다. NUC safety bridge는 이 토픽을 관찰하지만
-기본값에서는 output publisher를 만들지 않는다. 별도 commissioning에서 forwarding을
-켤 때에만 header를 제거하고 Clearpath Humble API 타입인 `geometry_msgs/msg/Twist`로
-`/j100_0519/cmd_vel`에 출력한다.
+`clearpath-platform.service`가 Jackal platform을 소유한다.
+`jackal-sensors.service`는 `robot.launch.py`를 다음 원칙으로 실행한다.
 
-지도와 MID360 extrinsic은 repository에서 임의 생성하지 않는다. 지도 YAML/이미지는
-사용자 보유 파일을 넣는다. MID360 기본 장착값은 기존 사용자 workspace의
-`base_link -> livox_frame` 설정을 가져왔지만 아직 이 package에서 실측하지 않았으므로
-확인 후 static TF 또는 URDF에 반영한다. 현재
-Nav2 odometry 입력 토픽은 `/j100_0519/platform/odom`으로 추론해 두었으며 MCU 연결
-후 실제 Clearpath graph로 검증해야 한다.
+- `launch_platform=false`: platform 중복 실행 방지
+- D455와 MID360 실행
+- `base_link -> livox_frame` static transform 발행
+- NUC network probe 실행
+- 센서 driver가 비정상 종료되면 systemd 또는 launch respawn으로 복구
 
-## Phase C: Radxa X4 도입
+Laptop의 `laptop.launch.py`는 laptop network probe와 sensor-only RViz만 실행한다.
+MID360은 raw `/livox/lidar` PointCloud2로 표시하며 지도나 경로 계획용 display를
+포함하지 않는다.
 
-```text
-                  dedicated unmanaged LAN hub
-             192.168.50.0/24, no institutional uplink
+## DDS discovery
 
-  Radxa X4 .3             NUC .2                 Laptop .1
-  cpr-j100-0519           jackal-sensors
-  ------------            --------------         -------------
-  MCU serial              D455 / MID360           RViz / CLI
-  Clearpath platform      PointCloud -> scan      goals / rosbag
-  command watchdog        AMCL / Nav2             diagnostics
-```
+역할별 Fast DDS XML은 UDP interface를 해당 장비의 `192.168.50.x` 주소 하나로
+제한하고 SHM transport를 함께 유지한다. Laptop과 NUC profile은 현재 실제로 존재하는
+두 peer만 초기 peer로 둔다. Radxa profile은 향후 네트워크 참가자 검증을 위해 남겨
+두었지만 현재 부팅 경로에서는 사용하지 않는다.
 
-### 이전 순서
+multicast를 끄고 interface allowlist를 사용했으므로 기관망으로 DDS traffic이 나가지
+않도록 의도한 구성이다. 다만 실제 패킷이 전용 LAN에만 흐른다는 결론은 packet
+capture 없이 확정하지 않는다.
 
-1. Radxa에 Ubuntu 22.04와 ROS 2 Humble을 설치하고 `.50.3` 통신을 검증한다.
-2. NUC hostname을 `jackal-sensors`로 변경한 뒤 재부팅하고 DNS/SSH known-host를
-   갱신한다.
-3. Radxa hostname을 `cpr-j100-0519`로 설정한다. 두 장비가 동시에 같은 hostname을
-   쓰는 구간을 만들지 않는다.
-4. Clearpath Humble stack과 기존 `robot.yaml`을 Radxa로 옮기고 domain 1,
-   namespace `j100_0519`, Fast DDS, 실제 MCU 장치를 반영해 platform 파일을 다시
-   생성한다.
-5. MCU USB/serial을 Radxa로 옮기고 platform만 단독 검증한다. 이때 바퀴를 지면에서
-   분리하거나 제조사 commissioning 절차를 따른다.
-6. NUC에서 D455, MID360, `/scan`, AMCL, Nav2를 순차 활성화한다.
-7. NUC를 chrony server, Radxa와 Laptop을 client로 구성하고 offset을 기록한다.
-8. monitor-only command 도달 시험 후 별도 승인된 commissioning에서만
-   `forward_cmd_vel=true`를 사용한다.
+## 부팅과 환경 소유권
 
-### 데이터 배치
-
-대역폭과 지연을 줄이기 위해 D455 이미지와 MID360 raw PointCloud는 NUC 내부
-처리에 우선 사용한다. Laptop 기본 RViz/기록 profile은 `/scan`, map, odom, TF,
-diagnostics, perception 결과만 구독한다. raw 센서가 필요한 실험에서만 명시적으로
+systemd service는 interactive `~/.bashrc`에 의존하지 않는다.
+`start_nuc_sensors.sh`가 ROS, Livox driver package hook, SDK library path, workspace와
+NUC network profile을 명시적으로 설정한다. `set -u`는 ROS setup을 모두 읽은 뒤에만
 활성화한다.
 
-### 시간과 command safety
+NUC의 별도 terminal이나 Laptop terminal에서 ROS CLI를 사용할 때는 각 역할의
+`jackal` shell 설정을 먼저 실행한다. 이 설정은 domain, RMW와 Fast DDS profile을
+한 terminal에만 적용한다.
 
-NUC는 센서 timestamp의 기준이 되므로 chrony server 역할을 맡는다. Radxa platform
-watchdog은 마지막 유효 명령이 0.5초 이상 오래되면 0 속도를 계속 출력해야 한다.
-LAN cable 제거, Nav2 process kill, NUC power loss를 각각 시험해 물리 정지가 1초
-이내인지 별도 계측한다. repository bridge의 timer 동작만으로 이 물리 안전 조건이
-입증됐다고 보지 않는다.
+## 검증 기준
 
-## 완료 판정
+1. `check_network.sh preflight <role>`이 주소와 middleware 환경을 통과한다.
+2. Laptop에서 NUC heartbeat를 10초 동안 연속 수신한다.
+3. D455 Color/Depth/CameraInfo publisher와 실제 image rate를 확인한다.
+4. MID360 PointCloud2/IMU publisher와 실제 point-cloud rate를 확인한다.
+5. NUC 재부팅 후 SSH로 launch하지 않아도 같은 토픽이 Laptop에서 조회된다.
 
-| 단계 | 판정 기준 |
-|---|---|
-| A | 양방향 heartbeat 10초, D455 12 Hz 이상 30초, 고정 0 명령 수신 |
-| B | `/scan`, `map -> odom -> base_link`, AMCL, Nav2 active, stamped 명령 도달 |
-| B safety | bridge가 `/j100_0519/cmd_vel` publisher가 아니며 platform OFF |
-| C network | 전용 hub에서 세 장비 heartbeat와 chrony offset 정상 |
-| C safety | 0.5초 watchdog 및 링크 단절 1초 이내 물리 정지 시험 통과 |
-
-각 판정은 실행 날짜, package commit, 실제 topic type/frame/rate, packet capture와 함께
-기록해야 한다. 아직 측정하지 않은 항목을 통과로 표기하지 않는다.
+실측 결과에는 날짜, package revision, topic type, frame과 rate를 함께 기록한다.
+장착 위치에서 `base_link -> livox_frame` 값이 측정됐다는 자료는 이 저장소에 없으므로,
+현재 static transform은 기존 구성에서 가져온 값으로 추론하고 별도 실측 대상으로
+취급한다.

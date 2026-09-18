@@ -1,0 +1,22 @@
+[Unit]
+Description=Jackal NUC D455 and MID360 sensor bringup
+Wants=network-online.target clearpath-platform.service
+After=network-online.target clearpath-platform.service
+
+[Service]
+Type=simple
+User=administrator
+Group=administrator
+WorkingDirectory=/home/administrator/moai_navigation_ws
+Environment="HOME=/home/administrator"
+Environment="ROS_HOME=/home/administrator/.ros"
+Environment="ROS_LOG_DIR=/home/administrator/.ros/log"
+ExecStart=/home/administrator/moai_navigation_ws/install/jackal_network_bringup/lib/jackal_network_bringup/start_nuc_sensors.sh
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

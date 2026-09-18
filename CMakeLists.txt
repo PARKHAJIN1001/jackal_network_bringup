@@ -25,10 +25,9 @@ install(
 install(
   PROGRAMS
     scripts/check_network.sh
-    scripts/cmd_vel_safety_bridge.py
     scripts/network_probe.py
     scripts/network_verifier.py
-    scripts/twist_stamper.py
+    scripts/start_nuc_sensors.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -44,6 +43,7 @@ if(BUILD_TESTING)
     test/test_config_and_launch.py
     TIMEOUT 60
   )
+  ament_add_pytest_test(time_sync_test test/test_time_sync.py TIMEOUT 30)
 endif()
 
 ament_package()

@@ -3,7 +3,6 @@
 set -u
 
 readonly PACKAGE_NAME="jackal_network_bringup"
-readonly CMD_TOPIC="/j100_0519/cmd_vel"
 
 usage() {
   cat <<'EOF'
@@ -12,11 +11,6 @@ Usage:
   check_network.sh verify-peer <laptop|nuc|radxa>
   check_network.sh verify-d455
   check_network.sh verify-mid360
-  check_network.sh wait-zero-cmd
-  check_network.sh send-zero-cmd
-
-send-zero-cmd publishes one fixed, all-zero Twist. It never accepts
-velocity values from the command line.
 EOF
 }
 
@@ -172,54 +166,6 @@ verify_mid360() {
   return 1
 }
 
-wait_zero_cmd() {
-  local payload
-  printf 'Waiting up to 20 seconds for one %s message ...\n' "$CMD_TOPIC"
-  if ! payload="$(timeout 20s ros2 topic echo --no-daemon --once \
-      --qos-profile system_default "$CMD_TOPIC" geometry_msgs/msg/Twist)"; then
-    fail "did not receive $CMD_TOPIC"
-    return 1
-  fi
-
-  if printf '%s\n' "$payload" | python3 -c '
-import math
-import sys
-import yaml
-
-documents = [item for item in yaml.safe_load_all(sys.stdin) if isinstance(item, dict)]
-if not documents:
-    raise SystemExit(1)
-twist = documents[0]
-values = []
-for group in ("linear", "angular"):
-    vector = twist.get(group, {})
-    values.extend(float(vector.get(axis, 0.0)) for axis in ("x", "y", "z"))
-raise SystemExit(0 if all(math.isfinite(value) and value == 0.0 for value in values) else 1)
-'; then
-    pass "received an all-zero Twist on $CMD_TOPIC"
-    return 0
-  fi
-  fail "received a non-zero or invalid Twist on $CMD_TOPIC"
-  return 1
-}
-
-send_zero_cmd() {
-  if (($# != 0)); then
-    fail "send-zero-cmd does not accept velocity arguments"
-    return 2
-  fi
-
-  local message
-  message='{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
-  if timeout 20s ros2 topic pub --once --wait-matching-subscriptions 1 \
-      --qos-profile system_default "$CMD_TOPIC" geometry_msgs/msg/Twist "$message"; then
-    pass "published one all-zero Twist on $CMD_TOPIC"
-    return 0
-  fi
-  fail "zero command was not delivered to a matching subscriber"
-  return 1
-}
-
 main() {
   if (($# < 1)); then
     usage
@@ -244,13 +190,6 @@ main() {
     verify-mid360)
       (($# == 0)) || { usage; return 2; }
       verify_mid360
-      ;;
-    wait-zero-cmd)
-      (($# == 0)) || { usage; return 2; }
-      wait_zero_cmd
-      ;;
-    send-zero-cmd)
-      send_zero_cmd "$@"
       ;;
     -h|--help|help)
       usage
