@@ -25,9 +25,14 @@ install(
 install(
   PROGRAMS
     scripts/check_network.sh
+    scripts/configure_time_sync.sh
+    scripts/network_preflight.py
+    scripts/ipfrag_session.py
     scripts/network_probe.py
     scripts/network_verifier.py
+    scripts/setup_network.sh
     scripts/start_nuc_sensors.sh
+    scripts/verify_network.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -43,6 +48,8 @@ if(BUILD_TESTING)
     test/test_config_and_launch.py
     TIMEOUT 60
   )
+  ament_add_pytest_test(network_preflight_test test/test_network_preflight.py TIMEOUT 30)
+  ament_add_pytest_test(ipfrag_session_test test/test_ipfrag_session.py TIMEOUT 30)
   ament_add_pytest_test(time_sync_test test/test_time_sync.py TIMEOUT 30)
 endif()
 

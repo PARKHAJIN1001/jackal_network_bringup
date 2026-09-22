@@ -560,3 +560,31 @@ NUC의 다른 terminal에서 Jackal 토픽만 보이고 D455/MID360 토픽이 �
 `clearpath_platform_msgs`가 Laptop에 없으면 해당 전용 메시지를
 `ros2 topic echo`로 디코딩할 수 없다. 표준 타입인 odometry, IMU, Image,
 PointCloud2는 현재 환경에서 조회할 수 있다.
+
+## Temporary IP reassembly settings (2026-09-21)
+
+This package owns both `ipfrag_high_thresh` (minimum 16777216 bytes) and
+`ipfrag_time` (3 seconds). Larger existing memory limits are preserved. These
+are a trial policy; historical Nav2 measurements at 128MiB do not validate it.
+
+```bash
+ros2 run jackal_network_bringup ipfrag_session.py status --check
+sudo python3 "$(ros2 pkg prefix jackal_network_bringup)/lib/jackal_network_bringup/ipfrag_session.py" apply
+# After the ROS stacks have stopped:
+sudo python3 "$(ros2 pkg prefix jackal_network_bringup)/lib/jackal_network_bringup/ipfrag_session.py" restore
+```
+
+`status --check` exits 0 ready, 1 not ready, 2 error and never changes settings.
+Root-owned recovery state is under `/run/jackal-network-ipfrag`. The directory
+is readable but only writable by root. Unreadable legacy state is an error (2),
+not evidence of readiness; restore that state with sudo before a new apply.
+Only changed values are owned and restored. External edits, missing originals,
+boot/network-namespace mismatches and failed writes retain recovery information.
+No permanent sysctl configuration or terminal-exit restoration is installed.
+
+If `/run/jackal-nav2-ipfrag/state.json` exists, stop the ROS stacks and use
+`restore --legacy-nav2` with the network tool before a new apply. It restores
+only values actually present in that legacy record. Never guess an original.
+Tests for the helper belong to this package; Nav2 consumes the status CLI.
+Rebuild both packages after migration. Remove only the verified dangling old
+Nav2 ipfrag helper link; do not copy the laptop network package over the NUC.

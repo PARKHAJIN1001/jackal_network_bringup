@@ -44,6 +44,7 @@ _jackal_network_env_main() {
   export FASTRTPS_DEFAULT_PROFILES_FILE="$profile"
   export FASTDDS_DEFAULT_PROFILES_FILE="$profile"
   export JACKAL_NETWORK_ROLE="$role"
+  export RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
   export LD_LIBRARY_PATH="/opt/ros/humble/lib:/opt/ros/humble/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
   printf 'Configured Jackal ROS network: role=%s ip=%s domain=%s rmw=%s\n' \
