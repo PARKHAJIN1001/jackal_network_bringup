@@ -7,8 +7,8 @@ readonly PACKAGE_NAME="jackal_network_bringup"
 usage() {
   cat <<'EOF'
 Usage:
-  check_network.sh preflight <laptop|nuc|radxa>
-  check_network.sh verify-peer <laptop|nuc|radxa>
+  check_network.sh preflight <laptop|nuc>
+  check_network.sh verify-peer <laptop|nuc>
   check_network.sh verify-d455
   check_network.sh verify-mid360
 EOF
@@ -26,14 +26,13 @@ expected_ip_for_role() {
   case "$1" in
     laptop) printf '192.168.50.1\n' ;;
     nuc) printf '192.168.50.2\n' ;;
-    radxa) printf '192.168.50.3\n' ;;
     *) return 1 ;;
   esac
 }
 
 validate_role() {
   if ! expected_ip_for_role "$1" >/dev/null; then
-    fail "unknown role '$1' (expected laptop, nuc, or radxa)"
+    fail "unknown role '$1' (expected laptop or nuc)"
     return 2
   fi
 }
@@ -119,9 +118,6 @@ raise SystemExit(0 if addresses == {sys.argv[2]} else 1)
       ;;
     nuc)
       check_package "realsense2_camera" || failures=$((failures + 1))
-      ;;
-    radxa)
-      check_package "clearpath_control" || failures=$((failures + 1))
       ;;
   esac
 

@@ -62,7 +62,7 @@ def generate_launch_description():
                     'camera_name': 'camera',
                     'camera_namespace': 'camera',
                     'enable_color': 'true',
-                    'enable_depth': 'true',
+                    'enable_depth': 'false',
                     'enable_infra1': 'false',
                     'enable_infra2': 'false',
                     'pointcloud.enable': 'false',
@@ -115,12 +115,13 @@ def generate_launch_description():
             '--child-frame-id', 'livox_frame',
         ],
     )
-    probe = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(PathJoinSubstitution([
-            package_share, 'launch', 'network_test.launch.py',
-        ])),
+    probe = Node(
+        package='jackal_network_bringup',
+        executable='network_probe.py',
+        name='network_probe_nuc',
+        output='screen',
         condition=IfCondition(LaunchConfiguration('launch_network_probe')),
-        launch_arguments={'role': 'nuc'}.items(),
+        parameters=[{'role': 'nuc'}],
     )
     return LaunchDescription(declarations + [
         platform,

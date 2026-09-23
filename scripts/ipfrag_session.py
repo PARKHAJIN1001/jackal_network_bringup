@@ -17,12 +17,15 @@ STATE_DIR = Path('/run/jackal-network-ipfrag')
 LEGACY_DIR = Path('/run/jackal-nav2-ipfrag')
 BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
 
-def status(state_path=None, legacy_path=None, kernel=IPFRAG, kernel_time=IPFRAG_TIME):
-    current = int(kernel.read_text()) if kernel.exists() else 0
+
+def status(state_path=None, legacy_path=None, kernel=None, kernel_time=None):
+    k = kernel if kernel is not None else IPFRAG
+    current = int(k.read_text()) if k.exists() else 0
     return {
         'ready': current >= MIN_IPFRAG,
-        'ipfrag_high_thresh': current
+        'ipfrag_high_thresh': current,
     }
+
 
 def _ros_processes_running():
     for entry in Path('/proc').iterdir():
@@ -52,32 +55,39 @@ def save(path, state):
 
 
 def change(action, state_path, kernel=IPFRAG, kernel_time=IPFRAG_TIME,
-           boot_file=BOOT_ID, processes=_ros_processes_running):
+           boot_file=BOOT_ID, processes=_ros_processes_running, **kwargs):
     current = int(kernel.read_text())
     boot = boot_file.read_text().strip()
     namespace = os.readlink('/proc/self/ns/net')
     state = json.loads(state_path.read_text()) if state_path.exists() else None
-    if state and state['boot'] != boot:
+    if state and state.get('boot') != boot:
         raise RuntimeError('Saved state belongs to another boot')
-    if state and state['network_namespace'] != namespace:
+    if state and state.get('network_namespace') != namespace:
         raise RuntimeError('Saved state belongs to another namespace')
-    
+
     if action == 'apply':
-        if current >= MIN_IPFRAG and not state:
+        if state:
+            return {'status': 'already_applied', **state}
+        if current >= MIN_IPFRAG:
             return {'status': 'already_sufficient', 'current': current}
         if processes():
             raise RuntimeError('Stop ROS stack first')
-        
+
         current_time = int(kernel_time.read_text()) if kernel_time.exists() else 30
-        state = {'boot': boot, 'network_namespace': namespace,
-                 'original': current, 'target': MIN_IPFRAG,
-                 'original_time': current_time, 'target_time': TARGET_IPFRAG_TIME}
+        state = {
+            'boot': boot,
+            'network_namespace': namespace,
+            'original': current,
+            'target': MIN_IPFRAG,
+            'original_time': current_time,
+            'target_time': TARGET_IPFRAG_TIME,
+        }
         save(state_path, state)
         kernel.write_text(str(MIN_IPFRAG) + '\n')
         if kernel_time.exists():
             kernel_time.write_text(str(TARGET_IPFRAG_TIME) + '\n')
         return {'status': 'applied', **state}
-        
+
     # restore
     if not state:
         raise RuntimeError('No saved original value')
@@ -86,21 +96,25 @@ def change(action, state_path, kernel=IPFRAG, kernel_time=IPFRAG_TIME,
     if kernel_time.exists():
         kernel_time.write_text(str(state.get('original_time', 30)) + '\n')
     state_path.unlink()
-    return {'status': 'restored'}
+    return {'status': 'restored', 'current': state['original']}
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['status', 'apply', 'restore'])
+    parser.add_argument('--check', action='store_true', help='Exit 0 if ready, 1 if not')
     args = parser.parse_args(argv)
-    
+
     if args.action == 'status':
-        print(json.dumps({'ipfrag_high_thresh': int(IPFRAG.read_text())}))
+        res = status()
+        print(json.dumps(res, indent=2))
+        if args.check:
+            return 0 if res['ready'] else 1
         return 0
-        
+
     if os.geteuid() != 0:
         raise RuntimeError('sudo required')
-        
+
     STATE_DIR.mkdir(mode=0o700, exist_ok=True)
     with (STATE_DIR / 'lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

@@ -8,7 +8,6 @@ import subprocess
 import xml.etree.ElementTree as element_tree
 
 from launch import LaunchDescription
-import yaml
 
 os.environ.setdefault('ROS_LOG_DIR', '/tmp/jackal_network_bringup_test_logs')
 
@@ -21,7 +20,6 @@ FAST_DDS_NAMESPACE = {
 ROLE_IPS = {
     'laptop': '192.168.50.1',
     'nuc': '192.168.50.2',
-    'radxa': '192.168.50.3',
 }
 
 
@@ -35,10 +33,7 @@ def _load_launch(filename):
 
 
 def test_public_launch_files_generate_descriptions():
-    for filename in (
-            'network_test.launch.py',
-            'robot.launch.py',
-            'laptop.launch.py'):
+    for filename in ('robot.launch.py',):
         assert isinstance(_load_launch(filename), LaunchDescription)
 
 
@@ -68,21 +63,10 @@ def test_role_profiles_are_unicast_only_and_keep_shm():
 
         assert allowlist == {role_ip}
         expected_peers = set(ROLE_IPS.values())
-        if role in ('laptop', 'nuc'):
-            expected_peers.remove(ROLE_IPS['radxa'])
         assert initial_peers == expected_peers
         assert transports == {'UDPv4', 'SHM'}
         assert avoid_multicast.text == 'true'
         assert builtin_transports.text == 'false'
-
-    local_root = element_tree.parse(
-        CONFIG_DIR / 'fastdds_local.xml').getroot()
-    local_transports = {
-        item.text
-        for item in local_root.findall(
-            './/f:transport_descriptor/f:type', FAST_DDS_NAMESPACE)
-    }
-    assert local_transports == {'UDPv4', 'SHM'}
 
 
 def test_structured_config_files_parse():
@@ -92,10 +76,6 @@ def test_structured_config_files_parse():
     assert mid360['lidar_configs'][0]['ip'] == '192.168.1.130'
     translation = mid360['lidar_configs'][0]['extrinsic_parameter']
     assert all(isinstance(translation[axis], int) for axis in ('x', 'y', 'z'))
-
-    with (CONFIG_DIR / 'jackal_network.rviz').open(
-            encoding='utf-8') as stream:
-        assert isinstance(yaml.safe_load(stream), dict)
 
 
 def test_network_env_refuses_direct_execution():
@@ -244,7 +224,12 @@ def test_network_package_contains_no_navigation_or_drive_implementation():
     for path in (
             CONFIG_DIR / 'nav2',
             CONFIG_DIR / 'maps',
+            CONFIG_DIR / 'jackal_network.rviz',
+            CONFIG_DIR / 'fastdds_radxa.xml',
+            CONFIG_DIR / 'fastdds_local.xml',
             PACKAGE_ROOT / 'launch' / 'nav2_navigation.launch.py',
+            PACKAGE_ROOT / 'launch' / 'network_test.launch.py',
+            PACKAGE_ROOT / 'launch' / 'laptop.launch.py',
             PACKAGE_ROOT / 'scripts' / 'twist_stamper.py',
             PACKAGE_ROOT / 'scripts' / 'cmd_vel_safety_bridge.py'):
         assert not path.exists()
@@ -253,7 +238,6 @@ def test_network_package_contains_no_navigation_or_drive_implementation():
         PACKAGE_ROOT / 'CMakeLists.txt',
         PACKAGE_ROOT / 'package.xml',
         PACKAGE_ROOT / 'launch' / 'robot.launch.py',
-        PACKAGE_ROOT / 'launch' / 'laptop.launch.py',
         PACKAGE_ROOT / 'scripts' / 'check_network.sh',
         PACKAGE_ROOT / 'scripts' / 'start_nuc_sensors.sh',
     )
@@ -267,29 +251,3 @@ def test_network_package_contains_no_navigation_or_drive_implementation():
             'cmd_vel',
             'send-zero-cmd'):
         assert forbidden not in implementation
-
-
-def test_rviz_profile_is_sensor_monitoring_only():
-    with (CONFIG_DIR / 'jackal_network.rviz').open(
-            encoding='utf-8') as stream:
-        config = yaml.safe_load(stream)
-
-    manager = config['Visualization Manager']
-    displays = manager['Displays']
-    display_classes = {display['Class'] for display in displays}
-    display_names = {display['Name'] for display in displays}
-    tool_classes = {tool['Class'] for tool in manager['Tools']}
-
-    assert manager['Global Options']['Fixed Frame'] == 'base_link'
-    assert 'MID360 PointCloud' in display_names
-    assert 'D455 Color' in display_names
-    assert 'rviz_default_plugins/PointCloud2' in display_classes
-    assert {
-        'rviz_default_plugins/Map',
-        'rviz_default_plugins/LaserScan',
-        'rviz_default_plugins/Path',
-    }.isdisjoint(display_classes)
-    assert {
-        'rviz_default_plugins/SetInitialPose',
-        'rviz_default_plugins/SetGoal',
-    }.isdisjoint(tool_classes)
